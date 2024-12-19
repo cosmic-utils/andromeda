@@ -1,11 +1,19 @@
+pub mod drive;
+pub mod error;
 pub mod message;
-use std::sync::Arc;
 
+use error::Error;
 use message::AppMessage;
+
+use cosmic::prelude::*;
 
 pub struct App {
     core: cosmic::app::Core,
-    drives: Vec<Arc<drives::Device>>,
+    nav_model: cosmic::widget::nav_bar::Model,
+
+    udisks2: Option<zbus::Connection>,
+
+    errors: Vec<Error>,
 }
 
 impl cosmic::Application for App {
@@ -23,57 +31,236 @@ impl cosmic::Application for App {
         &mut self.core
     }
 
+    fn nav_model(&self) -> Option<&cosmic::widget::nav_bar::Model> {
+        Some(&self.nav_model)
+    }
+
+    fn on_nav_select(
+        &mut self,
+        id: cosmic::widget::nav_bar::Id,
+    ) -> cosmic::app::Task<Self::Message> {
+        self.nav_model.activate(id);
+        cosmic::Task::none()
+    }
+
     fn init(
         core: cosmic::app::Core,
         _flags: Self::Flags,
     ) -> (Self, cosmic::app::Task<Self::Message>) {
         let mut tasks: Vec<cosmic::app::Task<Self::Message>> = Vec::new();
+        let nav_model = cosmic::widget::nav_bar::Model::default();
 
-        tasks.push(cosmic::task::future(async {
-            match drives::get_devices() {
-                Ok(devices) => {
-                    let mut drives = Vec::new();
-                    for device in devices {
-                        drives.push(Arc::new(device));
-                    }
-                    AppMessage::DrivesLoaded(drives)
-                }
-                Err(e) => AppMessage::AppError(e.to_string()),
-            }
-        }));
+        tasks.push(
+            cosmic::task::future(async {
+                let conn = zbus::connection::Builder::system()?
+                    .auth_mechanism(zbus::AuthMechanism::External)
+                    .build()
+                    .await?;
+
+                Result::<zbus::Connection, zbus::Error>::Ok(conn)
+            })
+            .map(|result| match result {
+                Ok(conn) => cosmic::app::message::app(AppMessage::ConnectionStarted(conn)),
+                Err(e) => cosmic::app::message::app(AppMessage::AppError(Error::from_err(
+                    Box::new(e),
+                    false,
+                ))),
+            }),
+        );
+
+        tasks.push(cosmic::task::future(async { AppMessage::NoOp }));
         (
             Self {
                 core,
-                drives: Vec::new(),
+                nav_model,
+                udisks2: None,
+                errors: Vec::new(),
             },
             cosmic::task::batch(tasks),
         )
     }
 
     fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
+        let mut tasks = Vec::new();
         match message {
-            AppMessage::AppError(str) => panic!("{}", str),
-            AppMessage::DrivesLoaded(drives) => self.drives = drives,
+            AppMessage::NoOp => {}
+            AppMessage::AppError(err) => self.errors.push(err),
+            AppMessage::DismissLastError => std::mem::drop(self.errors.pop()),
+            AppMessage::Quit => std::process::exit(0),
+            AppMessage::ConnectionStarted(conn) => {
+                self.udisks2 = Some(conn);
+                tasks.push(cosmic::task::message(AppMessage::RefreshDrives))
+            }
+            AppMessage::RefreshDrives => {
+                match self.udisks2.clone() {
+                    Some(conn) => {
+                        tasks.push(
+                            cosmic::task::future(async move {
+                                let proxy = zbus::Proxy::new(
+                                    &conn,
+                                    "org.freedesktop.UDisks2",
+                                    "/org/freedesktop/UDisks2/Manager",
+                                    "org.freedesktop.UDisks2.Manager",
+                                )
+                                .await?;
+
+                                let devices: Vec<zbus::zvariant::OwnedObjectPath> =
+                                    proxy
+                                        .call(
+                                            "GetBlockDevices",
+                                            &std::collections::HashMap::<
+                                                String,
+                                                zbus::zvariant::Value,
+                                            >::new(),
+                                        )
+                                        .await?;
+
+                                Result::<Vec<zbus::zvariant::OwnedObjectPath>, zbus::Error>::Ok(
+                                    devices,
+                                )
+                            })
+                            .map(|result| match result {
+                                Ok(devices) => {
+                                    // Filter devices by ones that contain
+                                    cosmic::app::message::app(AppMessage::BlockDevicesLoaded(
+                                        devices,
+                                    ))
+                                }
+                                Err(e) => cosmic::app::message::app(AppMessage::AppError(
+                                    Error::from_err(Box::new(e), false),
+                                )),
+                            }),
+                        )
+                    }
+                    None => tasks.push(cosmic::task::message(AppMessage::AppError(Error::new(
+                        "Could not refresh: DBus Interface to UDisks2 not initialized!",
+                        false,
+                    )))),
+                }
+            }
+            AppMessage::BlockDevicesLoaded(devices) => match self.udisks2.clone() {
+                Some(conn) => tasks.push(
+                    cosmic::task::future(async move {
+                        let mut drives = Vec::new();
+                        for device in devices {
+                            let pt_proxy = zbus::Proxy::new(
+                                &conn,
+                                "org.freedesktop.UDisks2",
+                                device.as_str(),
+                                "org.freedesktop.UDisks2.PartitionTable",
+                            )
+                            .await?;
+                            if let Ok(_) =
+                                pt_proxy.get_property::<zbus::zvariant::Str>("Type").await
+                            {
+                                let dev_proxy = zbus::Proxy::new(
+                                    &conn,
+                                    "org.freedesktop.UDisks2",
+                                    device.as_str(),
+                                    "org.freedesktop.UDisks2.Block",
+                                )
+                                .await?;
+                                let resp: zbus::zvariant::OwnedObjectPath =
+                                    dev_proxy.get_property("Drive").await?;
+
+                                let drive_path = resp.as_str();
+                                if drive_path != "/" {
+                                    let drive_proxy = zbus::Proxy::new(
+                                        &conn,
+                                        "org.freedesktop.UDisks2",
+                                        drive_path,
+                                        "org.freedesktop.UDisks2.Drive",
+                                    )
+                                    .await?;
+                                    let drive_model: zbus::zvariant::Str =
+                                        drive_proxy.get_property("Model").await?;
+                                    drives.push(drive::DriveID {
+                                        model: drive_model.to_string(),
+                                        path: drive_path.to_string(),
+                                    })
+                                }
+                            }
+                        }
+
+                        Result::<Vec<drive::DriveID>, zbus::Error>::Ok(drives)
+                    })
+                    .map(|res| match res {
+                        Ok(drives) => cosmic::app::message::app(AppMessage::DrivesLoaded(drives)),
+                        Err(e) => cosmic::app::message::app(AppMessage::AppError(Error::from_err(
+                            Box::new(e),
+                            false,
+                        ))),
+                    }),
+                ),
+                None => tasks.push(cosmic::task::message(AppMessage::AppError(Error::new(
+                    "ZBus connection not started yet!",
+                    false,
+                )))),
+            },
+            AppMessage::DrivesLoaded(drives) => {
+                for drive in drives {
+                    self.nav_model
+                        .insert()
+                        .text(drive.model.clone())
+                        .data(drive);
+                }
+            }
+            _ => {}
         }
-        cosmic::Task::none()
+        cosmic::Task::batch(tasks)
     }
 
-    fn view(&self) -> cosmic::Element<Self::Message> {
-        cosmic::widget::layer_container(cosmic::widget::column::with_children(
-            self.drives
-                .iter()
-                .filter(|drive_arc| drive_arc.model.is_some())
-                .map(|drive_arc| {
-                    cosmic::widget::row()
-                        .push(cosmic::widget::text::heading("Name: "))
-                        .push(cosmic::widget::text::heading(
-                            drive_arc.model.as_ref().unwrap(),
-                        ))
-                        .into()
-                })
-                .collect(),
-        ))
-        .layer(cosmic::cosmic_theme::Layer::Primary)
+    fn dialog(&self) -> Option<Element<Self::Message>> {
+        if self.errors.len() > 0 {
+            let error = self.errors.last().unwrap();
+            if error.recoverable {
+                Some(
+                    cosmic::widget::dialog()
+                        .title("Warning")
+                        .body(&error.description)
+                        .primary_action(
+                            cosmic::widget::button::suggested("Dismiss")
+                                .on_press(AppMessage::DismissLastError),
+                        )
+                        .into(),
+                )
+            } else {
+                Some(
+                    cosmic::widget::dialog()
+                        .title("Critical")
+                        .body(&error.description)
+                        .primary_action(
+                            cosmic::widget::button::destructive("Quit").on_press(AppMessage::Quit),
+                        )
+                        .into(),
+                )
+            }
+        } else {
+            None
+        }
+    }
+
+    fn view(&self) -> Element<Self::Message> {
+        cosmic::widget::layer_container(
+            match self.nav_model.active_data::<drive::DriveID>() {
+                Some(_) => match self.nav_model.active_data::<drive::DriveData>() {
+                    Some(drive_data) => cosmic::widget::layer_container(cosmic::widget::column())
+                        .layer(cosmic::cosmic_theme::Layer::Background),
+                    None => cosmic::widget::layer_container(cosmic::widget::text::title4(
+                        "Loading drive data...",
+                    ))
+                    .layer(cosmic::cosmic_theme::Layer::Background),
+                },
+                None => {
+                    cosmic::widget::layer_container(cosmic::widget::text("Please Select a Drive"))
+                        .layer(cosmic::cosmic_theme::Layer::Background)
+                }
+            }
+            .width(cosmic::iced::Length::Fill),
+        )
+        .layer(cosmic::cosmic_theme::Layer::Background)
+        .width(cosmic::iced::Length::Fill)
+        .height(cosmic::iced::Length::Fill)
         .into()
     }
 }

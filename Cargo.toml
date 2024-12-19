@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-drives = "0.6"
-mbrman = "0.5"
-gptman = "1.1"
+zbus = "5.2"
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
