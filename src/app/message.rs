@@ -5,6 +5,8 @@ pub enum AppMessage {
     DismissLastError,
     Quit,
 
+    SelectPartition(usize),
+
     // DBus requests
     RefreshDrives,
     DriveLoad,
@@ -13,7 +15,7 @@ pub enum AppMessage {
     ConnectionStarted(zbus::Connection),
     BlockDevicesLoaded(Vec<zbus::zvariant::OwnedObjectPath>),
     DrivesLoaded(Vec<super::drive::DriveID>),
-    DriveLoaded(super::drive::DriveData),
+    DriveLoaded(cosmic::widget::nav_bar::Id, super::drive::DriveData),
 }
 
 impl std::fmt::Debug for AppMessage {

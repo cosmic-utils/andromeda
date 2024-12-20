@@ -40,7 +40,7 @@ impl cosmic::Application for App {
         id: cosmic::widget::nav_bar::Id,
     ) -> cosmic::app::Task<Self::Message> {
         self.nav_model.activate(id);
-        cosmic::Task::none()
+        cosmic::task::message(AppMessage::DriveLoad)
     }
 
     fn init(
@@ -87,10 +87,14 @@ impl cosmic::Application for App {
             AppMessage::AppError(err) => self.errors.push(err),
             AppMessage::DismissLastError => std::mem::drop(self.errors.pop()),
             AppMessage::Quit => std::process::exit(0),
-            AppMessage::ConnectionStarted(conn) => {
-                self.udisks2 = Some(conn);
-                tasks.push(cosmic::task::message(AppMessage::RefreshDrives))
+
+            AppMessage::SelectPartition(partition) => {
+                if let Some(drive_data) = self.nav_model.active_data_mut::<drive::DriveData>() {
+                    drive_data.selected_partition(partition);
+                }
             }
+
+            // DBus requests
             AppMessage::RefreshDrives => {
                 match self.udisks2.clone() {
                     Some(conn) => {
@@ -138,6 +142,36 @@ impl cosmic::Application for App {
                     )))),
                 }
             }
+            AppMessage::DriveLoad => {
+                let active_id = self.nav_model.active();
+                match self.udisks2.clone() {
+                    Some(udisks2) => match self.nav_model.active_data::<drive::DriveID>().cloned() {
+                        Some(drive_id) => tasks.push(cosmic::task::future(
+                            drive::DriveData::populate(drive_id, udisks2),
+                        ).map(move |result| match result {
+                            Ok(drive_data) =>
+                                cosmic::app::message::app(AppMessage::DriveLoaded(active_id, drive_data)),
+                            Err(e) => cosmic::app::message::app(AppMessage::AppError(Error::from_err(Box::new(e), false)))
+                        }
+
+                        )),
+                        None => tasks.push(cosmic::task::message(AppMessage::AppError(Error::new(
+                            "Selected drive has no drive ID data, if this is showing, there is a bug in the application",
+                            false
+                        ))))
+                    },
+                    None => tasks.push(cosmic::task::message(AppMessage::AppError(Error::new(
+                        "Connection not initialized yet!",
+                        true,
+                    )))),
+                }
+            }
+            // DBus Results
+            AppMessage::ConnectionStarted(conn) => {
+                self.udisks2 = Some(conn);
+                tasks.push(cosmic::task::message(AppMessage::RefreshDrives))
+            }
+
             AppMessage::BlockDevicesLoaded(devices) => match self.udisks2.clone() {
                 Some(conn) => tasks.push(
                     cosmic::task::future(async move {
@@ -176,7 +210,8 @@ impl cosmic::Application for App {
                                         drive_proxy.get_property("Model").await?;
                                     drives.push(drive::DriveID {
                                         model: drive_model.to_string(),
-                                        path: drive_path.to_string(),
+                                        block_path: device.to_string(),
+                                        drive_path: drive_path.to_string(),
                                     })
                                 }
                             }
@@ -202,10 +237,15 @@ impl cosmic::Application for App {
                     self.nav_model
                         .insert()
                         .text(drive.model.clone())
+                        .icon(cosmic::widget::icon::from_name(
+                            "drive-harddisk-system-symbolic",
+                        ))
                         .data(drive);
                 }
             }
-            _ => {}
+            AppMessage::DriveLoaded(entity, drive_data) => {
+                self.nav_model.data_set(entity, drive_data)
+            }
         }
         cosmic::Task::batch(tasks)
     }
@@ -242,19 +282,19 @@ impl cosmic::Application for App {
 
     fn view(&self) -> Element<Self::Message> {
         cosmic::widget::layer_container(
-            match self.nav_model.active_data::<drive::DriveID>() {
+            match self.nav_model.active_data::<drive::DriveID>().cloned() {
                 Some(_) => match self.nav_model.active_data::<drive::DriveData>() {
-                    Some(drive_data) => cosmic::widget::layer_container(cosmic::widget::column())
+                    Some(drive_data) => cosmic::widget::layer_container(drive_data.view())
                         .layer(cosmic::cosmic_theme::Layer::Background),
                     None => cosmic::widget::layer_container(cosmic::widget::text::title4(
                         "Loading drive data...",
                     ))
                     .layer(cosmic::cosmic_theme::Layer::Background),
                 },
-                None => {
-                    cosmic::widget::layer_container(cosmic::widget::text("Please Select a Drive"))
-                        .layer(cosmic::cosmic_theme::Layer::Background)
-                }
+                None => cosmic::widget::layer_container(cosmic::widget::text::title1(
+                    "Please Select a Drive",
+                ))
+                .layer(cosmic::cosmic_theme::Layer::Background),
             }
             .width(cosmic::iced::Length::Fill),
         )
