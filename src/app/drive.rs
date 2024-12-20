@@ -12,7 +12,6 @@ pub struct DriveID {
 
 #[derive(Clone, Debug)]
 pub struct PartitionData {
-    number: u32,
     name: String,
     fs: String,
     offset: u64,
@@ -83,6 +82,8 @@ impl DriveData {
             .get_property::<zvariant::Str>("Type")
             .await?
             .to_string();
+        // TODO: Implement actually getting the LBA size
+        let sector_size = 512;
 
         // Read partitions
         let ptable: Vec<zvariant::Value> = ptable_proxy
@@ -114,11 +115,6 @@ impl DriveData {
             )
             .await?;
 
-            let number = partition_proxy
-                .get_property::<zvariant::Value>("Number")
-                .await?
-                .downcast()?;
-
             let name = std::path::Path::new(partition_path.as_str())
                 .file_name()
                 .ok_or(zbus::Error::Failure(
@@ -143,7 +139,6 @@ impl DriveData {
                 .downcast()?;
 
             partitions.push(PartitionData {
-                number,
                 name,
                 fs,
                 offset,
@@ -151,7 +146,46 @@ impl DriveData {
             })
         }
 
-        partitions.sort_by(|a, b| a.number.cmp(&b.number));
+        partitions.sort_by(|a, b| a.offset.cmp(&b.offset));
+        let mut empty_spaces = Vec::new();
+        // Add empty space at the start of the drive
+        if partitions[0].offset > 0 {
+            empty_spaces.push(PartitionData {
+                name: "Empty Space".to_string(),
+                fs: "".to_string(),
+                offset: 0,
+                size: partitions[0].offset,
+            });
+        }
+        for pair in partitions.chunks(2) {
+            let partition_a = &pair[0];
+            let partition_b = &pair[1];
+            let offset = partition_a.offset + partition_a.size;
+            let size = partition_b.offset - offset;
+            if size > sector_size {
+                empty_spaces.push(PartitionData {
+                    name: "Empty space".to_string(),
+                    fs: "".to_string(),
+                    offset,
+                    size,
+                })
+            }
+        }
+        // Empty space at end of drive
+        if let Some(partition_last) = partitions.last() {
+            let offset = partition_last.offset + partition_last.size;
+            let size = size - offset;
+            if size > sector_size {
+                empty_spaces.push(PartitionData {
+                    name: "Empty space".to_string(),
+                    fs: "".to_string(),
+                    offset,
+                    size,
+                })
+            }
+        }
+        partitions.append(&mut empty_spaces);
+        partitions.sort_by(|a, b| a.offset.cmp(&b.offset));
 
         Ok(Self {
             partitions,
@@ -194,10 +228,16 @@ impl DriveData {
                     .iter()
                     .enumerate()
                     .map(|(index, partition)| {
-                        let size = partition.size as f64 / MI_B as f64;
-                        let log_size = size.log(128.0).powf(4.0) as usize;
+                        let size = partition.size as f64 / KI_B as f64;
+                        let log_size = size.log2().powf(4.0) as usize;
+                        let color = if partition.fs.len() > 0 {
+                            cosmic.accent_color().into()
+                        } else {
+                            cosmic.on_primary_container_color().into()
+                        };
 
                         crate::widget::RingSection {
+                            color,
                             index,
                             size: log_size,
                         }
@@ -261,21 +301,25 @@ impl DriveData {
 
     fn partition_table(&self, cosmic: &cosmic::theme::CosmicTheme) -> Element<AppMessage> {
         cosmic::widget::layer_container(
-            cosmic::widget::column::with_children(
-                self.partitions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, partition)| {
-                        cosmic::widget::button::standard(partition.name.clone())
-                            .width(cosmic::iced::Length::Fill)
-                            .on_press(AppMessage::SelectPartition(index))
-                            .into()
-                    })
-                    .collect(),
-            )
-            .spacing(cosmic.space_s()), // TODO, add partition table
+            cosmic::widget::column()
+                .spacing(cosmic.space_s())
+                .push(cosmic::widget::text::heading("Partitions"))
+                .push(cosmic::iced_widget::horizontal_rule(1))
+                .append(
+                    &mut self
+                        .partitions
+                        .iter()
+                        .enumerate()
+                        .map(|(index, partition)| {
+                            cosmic::widget::button::standard(partition.name.clone())
+                                .width(cosmic::iced::Length::Fill)
+                                .on_press(AppMessage::SelectPartition(index))
+                                .into()
+                        })
+                        .collect::<Vec<Element<AppMessage>>>(),
+                ),
         )
-        .padding([cosmic.space_xs(), cosmic.space_s()])
+        .padding([cosmic.space_s(), cosmic.space_s()])
         .width(cosmic::iced::Length::Fill)
         .height(cosmic::iced::Length::Fill)
         .layer(cosmic::cosmic_theme::Layer::Primary)

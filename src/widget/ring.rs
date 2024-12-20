@@ -1,7 +1,9 @@
+use cosmic::iced::Color;
 use cosmic::prelude::*;
 use cosmic::widget::canvas::{self, Stroke};
 
 pub struct RingSection {
+    pub color: Color,
     pub size: usize,
     pub index: usize,
 }
@@ -58,7 +60,7 @@ impl canvas::Program<crate::app::message::AppMessage, Theme> for Ring {
             frame.stroke(
                 &arc.build(),
                 Stroke::default()
-                    .with_color(cosmic.accent_color().into())
+                    .with_color(section.color.into())
                     .with_width(
                         if self.selected_par.is_some_and(|par| par == section.index) {
                             self.line_width * 1.5
