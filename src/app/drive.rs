@@ -179,7 +179,7 @@ impl Drive {
                     })
                 }
             } else {
-                partitions.push(Block {
+                partitions_result.push(Block {
                     size: block.size().await?,
                     offset: 0,
                     size_for_display: client.size_for_display(block.size().await?, true, false),
@@ -232,7 +232,7 @@ impl Drive {
                     .push(
                         widget::row()
                             .align_y(iced::Alignment::Center)
-                            .push(widget::text::title3("Drive"))
+                            .push(widget::text::title3(&self.model))
                             .push(widget::horizontal_space())
                             .push(menu::bar(vec![menu::Tree::with_children(
                                 widget::button::standard("Manage")
