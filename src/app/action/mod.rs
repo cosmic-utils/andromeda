@@ -1,3 +1,4 @@
+//pub mod add_partition;
 pub mod drive_format;
 
 use cosmic::prelude::*;
@@ -8,6 +9,7 @@ use super::{error::Error, message::AppMessage};
 #[derive(Debug, Clone)]
 pub enum Action {
     DriveFormat(drive_format::DriveFormatOptions),
+    //AddPartition(add_partition::AddPartitionOptions),
 }
 
 impl Action {
@@ -35,7 +37,7 @@ impl Action {
 
     pub fn on_action(
         &mut self,
-        block: BlockProxy<'static>,
+        block: &super::drive::Drive,
     ) -> cosmic::app::Task<Result<AppMessage, Error>> {
         match self {
             Self::DriveFormat(options) => options.on_confirm(block),

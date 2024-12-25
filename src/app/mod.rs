@@ -146,7 +146,7 @@ impl cosmic::Application for App {
                     tasks.push(match self.nav_model.active_data::<drive::Drive>() {
                         Some(drive) => {
                             match self.current_action.take() {
-                                Some(mut action) => action.on_action(drive.block.clone()),
+                                Some(mut action) => action.on_action(drive),
                                 None => cosmic::task::message(Err(Error::new("Could not get current action even though confirm action message was sent, this is a bug! Please report", false)))
                             }.chain(cosmic::task::future(drive::Drive::load(self.client.clone().unwrap(), self.nav_model.active(), drive.block_path.clone())))
                         }

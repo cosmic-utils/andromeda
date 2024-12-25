@@ -93,8 +93,9 @@ impl DriveFormatOptions {
 
     pub fn on_confirm(
         &self,
-        block: udisks2::block::BlockProxy<'static>,
+        drive: &crate::app::drive::Drive,
     ) -> cosmic::app::Task<Result<AppMessage, Error>> {
+        let block = drive.block.clone();
         let erase = self.erase_option.unwrap();
         let ptable = self.ptable_option.unwrap();
         cosmic::task::future(async move {

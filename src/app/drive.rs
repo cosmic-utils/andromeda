@@ -198,7 +198,12 @@ impl Drive {
                 serial: drive.serial().await?,
                 revision: drive.revision().await?,
                 partitioning: match &ptable {
-                    Ok(ptable) => ptable.type_().await?,
+                    Ok(ptable) => match ptable.type_().await?.as_str() {
+                        "gpt" => "GUID Partition Table",
+                        "mbr" => "Master Boot Record",
+                        _ => "Unknown",
+                    }
+                    .to_string(),
                     Err(_) => "Empty".to_string(),
                 },
                 ring: Ring {
