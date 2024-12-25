@@ -5,17 +5,16 @@ pub struct Error {
 }
 
 impl Error {
-    pub fn from_err(err: Box<dyn std::error::Error>, recoverable: bool) -> Self {
-        Self {
-            description: err.to_string(),
-            recoverable,
-        }
-    }
-
     pub fn new(desc: impl Into<String>, recoverable: bool) -> Self {
         Self {
             description: desc.into(),
             recoverable,
         }
+    }
+}
+
+impl From<udisks2::Error> for Error {
+    fn from(error: udisks2::Error) -> Self {
+        Self::new(error.to_string(), false)
     }
 }

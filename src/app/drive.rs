@@ -1,344 +1,453 @@
+use std::collections::HashMap;
+
 use cosmic::prelude::*;
-use zbus::zvariant;
+use cosmic::widget::nav_bar::Id;
+use cosmic::{iced, theme, widget};
 
-use super::message::AppMessage;
+use udisks2::{
+    block::BlockProxy, drive::DriveProxy, filesystem::FilesystemProxy, partition::PartitionProxy,
+    partitiontable::PartitionTableProxy, zbus::zvariant::OwnedObjectPath, Client,
+};
+
+use super::action;
+use super::{error::Error, message::AppMessage};
+use crate::widget::Ring;
 
 #[derive(Clone, Debug)]
-pub struct DriveID {
+pub struct Drive {
+    pub block: BlockProxy<'static>,
+    pub block_path: OwnedObjectPath,
+    pub drive: DriveProxy<'static>,
+    pub ptable: Option<PartitionTableProxy<'static>>,
+
+    pub ring: Ring,
+
     pub model: String,
-    pub block_path: String,
-    pub drive_path: String,
+    pub size: String,
+    pub serial: String,
+    pub revision: String,
+    pub partitioning: String,
+
+    partitions: Vec<Block>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PartitionData {
-    name: String,
-    fs: String,
-    offset: u64,
-    size: u64,
+#[derive(std::cmp::Eq, PartialEq, Clone, Copy)]
+enum DriveAction {
+    Format,
+    MakeImg,
+    RestoreImg,
 }
 
-#[derive(Clone, Debug)]
-pub struct DriveData {
-    partitions: Vec<PartitionData>,
-    selected_partition: Option<usize>,
+impl widget::menu::Action for DriveAction {
+    type Message = Result<AppMessage, Error>;
 
-    serial: String,
-    revision: String,
-    model: String,
-    size: u64,
-    ptype: String,
-}
-
-const KI_B: u64 = 1024;
-const MI_B: u64 = 1024 * KI_B;
-const GI_B: u64 = 1024 * MI_B;
-const TI_B: u64 = 1024 * GI_B;
-const PI_B: u64 = 1024 * TI_B;
-
-impl DriveData {
-    pub async fn populate(drive_id: DriveID, conn: zbus::Connection) -> Result<Self, zbus::Error> {
-        let drive_proxy = zbus::Proxy::new(
-            &conn,
-            "org.freedesktop.UDisks2",
-            drive_id.drive_path.as_str(),
-            "org.freedesktop.UDisks2.Drive",
-        )
-        .await?;
-
-        let block_proxy = zbus::Proxy::new(
-            &conn,
-            "org.freedesktop.UDisks2",
-            drive_id.block_path.as_str(),
-            "org.freedesktop.UDisks2.Block",
-        )
-        .await?;
-
-        let ptable_proxy = zbus::Proxy::new(
-            &conn,
-            "org.freedesktop.UDisks2",
-            drive_id.block_path.as_str(),
-            "org.freedesktop.UDisks2.PartitionTable",
-        )
-        .await?;
-
-        // Read serial
-        let serial = drive_proxy
-            .get_property::<zvariant::Str>("Serial")
-            .await?
-            .to_string();
-        // Read revision
-        let revision = drive_proxy
-            .get_property::<zvariant::Str>("Revision")
-            .await?
-            .to_string();
-        // Read size
-        let size = block_proxy
-            .get_property::<zvariant::Value>("Size")
-            .await?
-            .downcast()?;
-        // Read ptype
-        let ptype = ptable_proxy
-            .get_property::<zvariant::Str>("Type")
-            .await?
-            .to_string();
-        // TODO: Implement actually getting the LBA size
-        let sector_size = 512;
-
-        // Read partitions
-        let ptable: Vec<zvariant::Value> = ptable_proxy
-            .get_property::<zvariant::Array>("Partitions")
-            .await?
-            .to_vec();
-        let mut partitions = Vec::new();
-        for value in ptable {
-            let partition_path = value.downcast::<zvariant::ObjectPath>()?;
-            let partition_proxy = zbus::Proxy::new(
-                &conn,
-                "org.freedesktop.UDisks2",
-                partition_path.as_str(),
-                "org.freedesktop.UDisks2.Partition",
-            )
-            .await?;
-            let block_proxy = zbus::Proxy::new(
-                &conn,
-                "org.freedesktop.UDisks2",
-                partition_path.as_str(),
-                "org.freedesktop.UDisks2.Block",
-            )
-            .await?;
-            let _fs_proxy = zbus::Proxy::new(
-                &conn,
-                "org.freedesktop.UDisks2",
-                partition_path.as_str(),
-                "org.freedesktop.UDisks2.FileSystem",
-            )
-            .await?;
-
-            let name = std::path::Path::new(partition_path.as_str())
-                .file_name()
-                .ok_or(zbus::Error::Failure(
-                    "Could not parse partition path!".to_string(),
-                ))?
-                .to_string_lossy()
-                .to_string();
-
-            let fs = block_proxy
-                .get_property::<zvariant::Str>("IdType")
-                .await?
-                .to_string();
-
-            let offset = partition_proxy
-                .get_property::<zvariant::Value>("Offset")
-                .await?
-                .downcast()?;
-
-            let par_size = partition_proxy
-                .get_property::<zvariant::Value>("Size")
-                .await?
-                .downcast()?;
-
-            partitions.push(PartitionData {
-                name,
-                fs,
-                offset,
-                size: par_size,
-            })
+    fn message(&self) -> Self::Message {
+        match self {
+            Self::Format => Ok(AppMessage::Action(action::Action::DriveFormat(
+                action::drive_format::DriveFormatOptions::new(),
+            ))),
+            Self::MakeImg => Ok(AppMessage::NoOp),
+            Self::RestoreImg => Ok(AppMessage::NoOp),
         }
-
-        partitions.sort_by(|a, b| a.offset.cmp(&b.offset));
-        let mut empty_spaces = Vec::new();
-        // Add empty space at the start of the drive
-        if partitions[0].offset > 0 {
-            empty_spaces.push(PartitionData {
-                name: "Empty Space".to_string(),
-                fs: "".to_string(),
-                offset: 0,
-                size: partitions[0].offset,
-            });
-        }
-        for pair in partitions.chunks(2) {
-            let partition_a = &pair[0];
-            let partition_b = &pair[1];
-            let offset = partition_a.offset + partition_a.size;
-            let size = partition_b.offset - offset;
-            if size > sector_size {
-                empty_spaces.push(PartitionData {
-                    name: "Empty space".to_string(),
-                    fs: "".to_string(),
-                    offset,
-                    size,
-                })
-            }
-        }
-        // Empty space at end of drive
-        if let Some(partition_last) = partitions.last() {
-            let offset = partition_last.offset + partition_last.size;
-            let size = size - offset;
-            if size > sector_size {
-                empty_spaces.push(PartitionData {
-                    name: "Empty space".to_string(),
-                    fs: "".to_string(),
-                    offset,
-                    size,
-                })
-            }
-        }
-        partitions.append(&mut empty_spaces);
-        partitions.sort_by(|a, b| a.offset.cmp(&b.offset));
-
-        Ok(Self {
-            partitions,
-            selected_partition: None,
-
-            model: drive_id.model,
-            serial,
-            revision,
-            size,
-            ptype,
-        })
     }
-    pub fn view(&self) -> Element<super::message::AppMessage> {
-        let theme = cosmic::theme::active();
+}
+
+impl Drive {
+    pub async fn load(
+        client: Client,
+        id: Id,
+        block_path: OwnedObjectPath,
+    ) -> Result<AppMessage, Error> {
+        let block_device = client.object(block_path.clone()).unwrap();
+        let block = block_device.block().await?;
+
+        let drive_path = block.drive().await?;
+        let drive_device = client.object(drive_path).unwrap();
+        let drive = drive_device.drive().await?;
+
+        let ptable = block_device.partition_table().await;
+
+        let mut partitions = Vec::new();
+        if let Ok(ptable) = &ptable {
+            for partition_path in ptable.partitions().await? {
+                let block = client
+                    .object(partition_path.clone())
+                    .unwrap()
+                    .block()
+                    .await?;
+                let part = client
+                    .object(partition_path.clone())
+                    .unwrap()
+                    .partition()
+                    .await?;
+                let fs = client
+                    .object(partition_path.clone())
+                    .unwrap()
+                    .filesystem()
+                    .await;
+                partitions.push(Block {
+                    size: part.size().await?,
+                    offset: part.offset().await?,
+                    size_for_display: client.size_for_display(part.size().await?, true, false),
+                    offset_for_display: client.size_for_display(part.offset().await?, true, false),
+                    partition: Some(Partition {
+                        name: std::path::Path::new(&partition_path.to_string())
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string(),
+
+                        block_size: client.size_for_display(block.size().await?, true, false),
+                        size: client.size_for_display(part.size().await?, true, false),
+                        offset: client.size_for_display(part.offset().await?, true, false),
+                        r#type: client
+                            .partition_type_for_display(
+                                ptable.type_().await?.as_str(),
+                                part.type_().await?.as_str(),
+                            )
+                            .unwrap_or("part-type\u{004}None".to_string())
+                            .split('\u{004}')
+                            .last()
+                            .unwrap_or(part.type_().await?.as_str())
+                            .to_string(),
+                        uuid: block.id_uuid().await?,
+
+                        partition_id: client
+                            .id_for_display(
+                                block.id_usage().await?.as_str(),
+                                block.id_type().await?.as_str(),
+                                block.id_version().await?.as_str(),
+                                false,
+                            )
+                            .split('\u{004}')
+                            .last()
+                            .unwrap_or(block.id_type().await?.as_str())
+                            .to_string(),
+
+                        block,
+                        part,
+                        fs: fs.ok(),
+                    }),
+                });
+            }
+
+            partitions.sort_by(|a, b| a.offset.cmp(&b.offset));
+            let mut partitions_result = Vec::new();
+            if partitions.len() > 0 {
+                // Leading empty space
+                let start = 0;
+                let end = partitions[0].offset;
+                // TODO: Block size checking for drives
+                if end - start > 4 {
+                    partitions_result.push(Block {
+                        size: end - start,
+                        offset: start,
+                        size_for_display: client.size_for_display(end - start, true, false),
+                        offset_for_display: client.size_for_display(start, true, false),
+                        partition: None,
+                    })
+                }
+                // Partition pairs
+                for (par_a, par_b) in partitions.iter().zip(partitions.iter().skip(1)) {
+                    let start = par_a.offset + par_a.size;
+                    let end = par_b.offset;
+
+                    partitions_result.push(par_a.clone());
+                    if end - start > 512 {
+                        partitions_result.push(Block {
+                            size: end - start,
+                            offset: start,
+                            size_for_display: client.size_for_display(end - start, true, false),
+                            offset_for_display: client.size_for_display(start, true, false),
+                            partition: None,
+                        })
+                    }
+                }
+                // Push last partition
+                let last_par = partitions.last().unwrap();
+                partitions_result.push(last_par.clone());
+                // Trailing empty space
+                let start = last_par.offset + last_par.size;
+                let end = block.size().await?;
+                if end - start > 4 {
+                    partitions_result.push(Block {
+                        size: end - start,
+                        offset: start,
+                        size_for_display: client.size_for_display(end - start, true, false),
+                        offset_for_display: client.size_for_display(start, true, false),
+                        partition: None,
+                    })
+                }
+            } else {
+                partitions.push(Block {
+                    size: block.size().await?,
+                    offset: 0,
+                    size_for_display: client.size_for_display(block.size().await?, true, false),
+                    offset_for_display: client.size_for_display(0, true, false),
+                    partition: None,
+                });
+            }
+            partitions = partitions_result;
+        }
+
+        Ok(AppMessage::DriveRead(
+            id,
+            Drive {
+                model: drive.model().await?,
+                size: client.size_for_display(block.size().await?, true, false),
+                serial: drive.serial().await?,
+                revision: drive.revision().await?,
+                partitioning: match &ptable {
+                    Ok(ptable) => ptable.type_().await?,
+                    Err(_) => "Empty".to_string(),
+                },
+                ring: Ring {
+                    sections: Vec::new(),
+                    line_width: 12.0,
+                    selected_par: None,
+                },
+
+                partitions,
+
+                block,
+                block_path,
+                drive,
+                ptable: ptable.ok(),
+            },
+        ))
+    }
+
+    pub fn view(&self) -> Element<Result<AppMessage, Error>> {
+        let theme = theme::active();
         let cosmic = theme.cosmic();
-        cosmic::widget::layer_container(
-            cosmic::widget::column()
+
+        use widget::menu;
+        widget::column()
+            .spacing(cosmic.space_s())
+            // Drive view
+            .push(
+                widget::column()
+                    .spacing(cosmic.space_xs())
+                    // Header row
+                    .push(
+                        widget::row()
+                            .align_y(iced::Alignment::Center)
+                            .push(widget::text::title3("Drive"))
+                            .push(widget::horizontal_space())
+                            .push(menu::bar(vec![menu::Tree::with_children(
+                                widget::button::standard("Manage")
+                                    .trailing_icon(widget::icon::from_name("pan-down-symbolic")),
+                                menu::items(
+                                    &HashMap::new(),
+                                    vec![
+                                        menu::Item::Button("Format", None, DriveAction::Format),
+                                        menu::Item::Divider,
+                                        menu::Item::ButtonDisabled(
+                                            "Create Disk Image",
+                                            None,
+                                            DriveAction::MakeImg,
+                                        ),
+                                        menu::Item::ButtonDisabled(
+                                            "Restore Disk Image",
+                                            None,
+                                            DriveAction::RestoreImg,
+                                        ),
+                                    ],
+                                ),
+                            )])),
+                    )
+                    // Drive information
+                    .push(
+                        widget::layer_container(
+                            widget::row()
+                                .align_y(iced::Alignment::Center)
+                                .push(widget::canvas(&self.ring))
+                                .push(widget::horizontal_space())
+                                .push(
+                                    widget::column()
+                                        .spacing(cosmic.space_xs())
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::heading("Size"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.size)),
+                                        )
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::body("Serial"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.serial)),
+                                        )
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::body("Revision"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.revision)),
+                                        )
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::heading("Partition Table"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.partitioning)),
+                                        ),
+                                ),
+                        )
+                        .padding([cosmic.space_xs(), cosmic.space_xs()])
+                        .layer(cosmic::cosmic_theme::Layer::Primary),
+                    ),
+            )
+            .push(
+                widget::column()
+                    .push(widget::text::title3("Partitions"))
+                    .push(iced::widget::horizontal_rule(1)),
+            )
+            .push(widget::scrollable(
+                widget::column::with_children(
+                    self.partitions
+                        .iter()
+                        .map(|partition| partition.view())
+                        .collect(),
+                )
+                .padding([0, cosmic.space_xs(), 0, 0])
+                .spacing(cosmic.space_xs()),
+            ))
+            .into()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Block {
+    offset: u64,
+    offset_for_display: String,
+    size: u64,
+    size_for_display: String,
+    partition: Option<Partition>,
+}
+
+impl Block {
+    fn view(&self) -> Element<Result<AppMessage, Error>> {
+        if let Some(partition) = &self.partition {
+            partition.view()
+        } else {
+            let theme = theme::active();
+            let cosmic = theme.cosmic();
+            widget::column()
                 .spacing(cosmic.space_xs())
                 .push(
-                    cosmic::widget::row()
-                        .spacing(cosmic.space_xs())
-                        .push(self.ring(&cosmic))
-                        .push(self.info(&cosmic)),
+                    widget::row()
+                        .align_y(iced::Alignment::Center)
+                        .push(widget::text::title4("Empty Space")),
                 )
-                .push(self.partition_table(&cosmic)),
-        )
-        .layer(cosmic::cosmic_theme::Layer::Background)
-        .into()
-    }
-
-    pub fn selected_partition(&mut self, partition: usize) {
-        self.selected_partition = Some(partition);
-    }
-
-    fn ring(&self, cosmic: &cosmic::theme::CosmicTheme) -> Element<AppMessage> {
-        cosmic::widget::layer_container(
-            cosmic::widget::canvas(crate::widget::Ring {
-                sections: self
-                    .partitions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, partition)| {
-                        let size = partition.size as f64 / KI_B as f64;
-                        let log_size = size.log2().powf(4.0) as usize;
-                        let color = if partition.fs.len() > 0 {
-                            cosmic.accent_color().into()
-                        } else {
-                            cosmic.on_primary_container_color().into()
-                        };
-
-                        crate::widget::RingSection {
-                            color,
-                            index,
-                            size: log_size,
-                        }
-                    })
-                    .collect(),
-                line_width: 10.,
-                selected_par: self.selected_partition,
-            })
-            .height(cosmic::iced::Length::Fill)
-            .width(cosmic::iced::Length::Fill),
-        )
-        .padding([cosmic.space_l(), cosmic.space_l()])
-        .width(cosmic::iced::Length::Fill)
-        .height(cosmic::iced::Length::Fill)
-        .layer(cosmic::cosmic_theme::Layer::Primary)
-        .into()
-    }
-
-    fn info(&self, cosmic: &cosmic::theme::CosmicTheme) -> Element<AppMessage> {
-        if let Some(index) = self.selected_partition {
-            let partition = &self.partitions[index];
-            cosmic::widget::layer_container(
-                cosmic::widget::column()
-                    .spacing(cosmic.space_s())
-                    .push(cosmic::widget::text::title4(partition.name.clone()))
-                    .push(cosmic::iced_widget::horizontal_rule(1))
-                    .push(self.info_item("Filesystem".to_string(), partition.fs.clone()))
-                    .push(self.info_item("Offset".to_string(), format_bytes(partition.offset)))
-                    .push(self.info_item("Size".to_string(), format_bytes(partition.size))),
-            )
-            .padding([cosmic.space_xs(), cosmic.space_s()])
-            .width(cosmic::iced::Length::Fill)
-            .height(cosmic::iced::Length::Fill)
-            .layer(cosmic::cosmic_theme::Layer::Primary)
-            .into()
-        } else {
-            cosmic::widget::layer_container(
-                cosmic::widget::column()
-                    .spacing(cosmic.space_s())
-                    .push(cosmic::widget::text::title4(self.model.clone()))
-                    .push(cosmic::iced_widget::horizontal_rule(1))
-                    .push(self.info_item("Serial".to_string(), self.serial.clone()))
-                    .push(self.info_item("Revision".to_string(), self.revision.clone()))
-                    .push(self.info_item("Size".to_string(), format_bytes(self.size.clone())))
-                    .push(self.info_item("Partitioning".to_string(), self.ptype.clone())),
-            )
-            .padding([cosmic.space_xs(), cosmic.space_s()])
-            .width(cosmic::iced::Length::Fill)
-            .height(cosmic::iced::Length::Fill)
-            .layer(cosmic::cosmic_theme::Layer::Primary)
-            .into()
+                .push(
+                    widget::layer_container(
+                        widget::row()
+                            .align_y(iced::Alignment::Center)
+                            .spacing(cosmic.space_s())
+                            .push(
+                                widget::row()
+                                    .push(widget::text::heading("Size"))
+                                    .push(widget::horizontal_space())
+                                    .push(widget::text::heading(&self.size_for_display)),
+                            )
+                            .push(
+                                widget::row()
+                                    .push(widget::text::heading("Offset"))
+                                    .push(widget::horizontal_space())
+                                    .push(widget::text::heading(&self.offset_for_display)),
+                            ),
+                    )
+                    .padding([cosmic.space_xs(), cosmic.space_xs()])
+                    .layer(cosmic::cosmic_theme::Layer::Primary),
+                )
+                .into()
         }
-    }
-
-    fn info_item(&self, field: String, value: String) -> cosmic::widget::Row<AppMessage> {
-        cosmic::widget::row()
-            .push(cosmic::widget::text::body(field.clone()))
-            .push(cosmic::widget::horizontal_space())
-            .push(cosmic::widget::text::body(value.clone()))
-    }
-
-    fn partition_table(&self, cosmic: &cosmic::theme::CosmicTheme) -> Element<AppMessage> {
-        cosmic::widget::layer_container(
-            cosmic::widget::column()
-                .spacing(cosmic.space_s())
-                .push(cosmic::widget::text::heading("Partitions"))
-                .push(cosmic::iced_widget::horizontal_rule(1))
-                .append(
-                    &mut self
-                        .partitions
-                        .iter()
-                        .enumerate()
-                        .map(|(index, partition)| {
-                            cosmic::widget::button::standard(partition.name.clone())
-                                .width(cosmic::iced::Length::Fill)
-                                .on_press(AppMessage::SelectPartition(index))
-                                .into()
-                        })
-                        .collect::<Vec<Element<AppMessage>>>(),
-                ),
-        )
-        .padding([cosmic.space_s(), cosmic.space_s()])
-        .width(cosmic::iced::Length::Fill)
-        .height(cosmic::iced::Length::Fill)
-        .layer(cosmic::cosmic_theme::Layer::Primary)
-        .into()
     }
 }
 
-fn format_bytes(size_unformatted: u64) -> String {
-    if size_unformatted >= PI_B {
-        format!("{:.1} PiB", (size_unformatted as f64 / PI_B as f64) as f64,)
-    } else if size_unformatted >= TI_B {
-        format!("{:.1} TiB", (size_unformatted as f64 / TI_B as f64) as f64,)
-    } else if size_unformatted >= GI_B {
-        format!("{:.1} GiB", (size_unformatted as f64 / GI_B as f64) as f64,)
-    } else if size_unformatted >= MI_B {
-        format!("{:.1} MiB", (size_unformatted as f64 / MI_B as f64) as f64,)
-    } else if size_unformatted >= KI_B {
-        format!("{:.1} KiB", (size_unformatted as f64 / KI_B as f64) as f64,)
-    } else {
-        format!("{} Bytes", size_unformatted)
+#[derive(Clone, Debug)]
+pub struct Partition {
+    pub block: BlockProxy<'static>,
+    pub part: PartitionProxy<'static>,
+    pub fs: Option<FilesystemProxy<'static>>,
+
+    pub name: String,
+    pub partition_id: String,
+    pub size: String,
+    pub offset: String,
+
+    pub r#type: String,
+    pub block_size: String,
+
+    pub uuid: String,
+}
+
+impl Partition {
+    pub fn view(&self) -> Element<Result<AppMessage, Error>> {
+        let theme = theme::active();
+        let cosmic = theme.cosmic();
+
+        widget::column()
+            .spacing(cosmic.space_xs())
+            // Header row
+            .push(
+                widget::row()
+                    .align_y(iced::Alignment::Center)
+                    .push(widget::text::title4(&self.name)),
+            )
+            // Partition information
+            .push(
+                widget::layer_container(
+                    widget::column()
+                        .push(
+                            widget::row()
+                                .align_y(iced::Alignment::Center)
+                                .spacing(cosmic.space_s())
+                                .push(
+                                    widget::column()
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::heading("Filesystem"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.partition_id)),
+                                        )
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::heading("Size"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.size)),
+                                        )
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::heading("Offset"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::heading(&self.offset)),
+                                        ),
+                                )
+                                .push(
+                                    widget::column()
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::body("Capacity"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::body(&self.block_size)),
+                                        )
+                                        .push(
+                                            widget::row()
+                                                .push(widget::text::body("Type"))
+                                                .push(widget::horizontal_space())
+                                                .push(widget::text::body(&self.r#type)),
+                                        ),
+                                ),
+                        )
+                        .push(
+                            widget::row()
+                                .push(widget::horizontal_space())
+                                .push(widget::text::caption(&self.uuid)),
+                        ),
+                )
+                .padding([cosmic.space_xs(), cosmic.space_xs()])
+                .layer(cosmic::cosmic_theme::Layer::Primary),
+            )
+            .into()
     }
 }

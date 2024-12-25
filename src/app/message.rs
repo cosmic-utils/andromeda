@@ -1,25 +1,24 @@
-#[derive(Clone)]
+use super::drive::Drive;
+
+#[derive(Clone, Debug)]
 pub enum AppMessage {
     NoOp,
-    AppError(super::Error),
     DismissLastError,
     Quit,
 
-    SelectPartition(usize),
+    InitClient,
+    InitClientDone(udisks2::Client),
 
-    // DBus requests
-    RefreshDrives,
-    DriveLoad,
+    ReadDevices,
+    ReadDevicesDone(Vec<udisks2::zbus::zvariant::OwnedObjectPath>),
 
-    // DBus Results
-    ConnectionStarted(zbus::Connection),
-    BlockDevicesLoaded(Vec<zbus::zvariant::OwnedObjectPath>),
-    DrivesLoaded(Vec<super::drive::DriveID>),
-    DriveLoaded(cosmic::widget::nav_bar::Id, super::drive::DriveData),
-}
+    InsertDrive(udisks2::zbus::zvariant::OwnedObjectPath),
+    DriveRead(cosmic::widget::nav_bar::Id, Drive),
 
-impl std::fmt::Debug for AppMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "App Message")
-    }
+    // Actions
+    Action(super::action::Action),
+    ActionSelection(usize, usize),
+    ConfirmAction,
+    CancelAction,
+    ActionDone,
 }

@@ -2,19 +2,23 @@ use cosmic::iced::Color;
 use cosmic::prelude::*;
 use cosmic::widget::canvas::{self, Stroke};
 
+#[derive(Clone, Debug)]
 pub struct RingSection {
     pub color: Color,
     pub size: usize,
     pub index: usize,
 }
 
+#[derive(Clone, Debug)]
 pub struct Ring {
     pub sections: Vec<RingSection>,
     pub line_width: f32,
     pub selected_par: Option<usize>,
 }
 
-impl canvas::Program<crate::app::message::AppMessage, Theme> for Ring {
+impl canvas::Program<Result<crate::app::message::AppMessage, crate::app::error::Error>, Theme>
+    for Ring
+{
     type State = ();
 
     fn draw(
