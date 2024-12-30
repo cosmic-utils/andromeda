@@ -7,6 +7,7 @@ edition = "2021"
 udisks2 = "0.2"
 
 [dependencies.libcosmic]
+#path = "../libcosmic"
 git = "https://github.com/pop-os/libcosmic.git"
 default-features = false
 features = ["a11y", "tokio", "winit", "wgpu", "xdg-portal", "about"]
