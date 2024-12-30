@@ -39,7 +39,7 @@ impl canvas::Program<Result<crate::app::message::AppMessage, crate::app::error::
         frame.stroke(
             &bg_circle,
             Stroke::default()
-                .with_color(cosmic.bg_color().into())
+                .with_color(cosmic.primary_component_color().into())
                 .with_width(self.line_width),
         );
 

@@ -13,12 +13,29 @@ pub enum AppMessage {
     ReadDevicesDone(Vec<udisks2::zbus::zvariant::OwnedObjectPath>),
 
     InsertDrive(udisks2::zbus::zvariant::OwnedObjectPath),
+    LoadDrive(
+        cosmic::widget::nav_bar::Id,
+        udisks2::zbus::zvariant::OwnedObjectPath,
+    ),
     DriveRead(cosmic::widget::nav_bar::Id, Drive),
 
-    // Actions
-    Action(super::action::Action),
-    ActionSelection(usize, usize),
-    ConfirmAction,
-    CancelAction,
-    ActionDone,
+    // === === === Operations === === ===
+    OpenOperationDialog(super::operation::Operation),
+    CancelOperation,
+    ConfirmOperation,
+    PerformOperation(super::drive::Drive),
+    OperationFinish,
+
+    // Drive Format
+    OperationDriveFormatEraseMode(usize),
+    OperationDriveFormatPTableType(usize),
+
+    // Add Partition
+    OperationAddPartitionSizeUpdate(String),
+    OperationAddPartitionSizeSave,
+
+    // Format Partition
+    OperationPartitionFormatNameUpdate(String),
+    OperationPartitionFormatToggleErase(bool),
+    OperationPartitionFormatSelectFS(usize),
 }
